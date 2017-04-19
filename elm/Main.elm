@@ -1,8 +1,8 @@
 module Main exposing (..)
 
 import Html exposing (..)
-import Html.Attributes exposing (href)
-import Html.Events exposing (onClick)
+import Html.Attributes as A exposing (href)
+import Html.Events as E exposing (onInput, onClick)
 import Http
 import Json.Decode as JD
 import Rails
@@ -38,7 +38,7 @@ type alias Model =
 
 type Msg
     = GamesRetrieved (Result Http.Error (List Game))
-    | ChooseGame Int
+    | ChooseGame String
     | CableMsg ACMsg.Msg
     | SubscriptionConfirmed ID.Identifier
 
@@ -74,11 +74,16 @@ update msg model =
         GamesRetrieved r ->
             { model | games = RemoteData.fromResult r } ! []
 
-        ChooseGame int ->
-            if Maybe.withDefault False <| Maybe.map (gameHasId int) model.currentGame then
-                ( model, Cmd.none )
-            else
-                chooseGame int model
+        ChooseGame str ->
+            case Result.toMaybe <| String.toInt str of
+                Just int ->
+                    if Maybe.withDefault False <| Maybe.map (gameHasId int) model.currentGame then
+                        ( model, Cmd.none )
+                    else
+                        chooseGame int model
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         CableMsg msg_ ->
             ActionCable.update msg_ model.cable
@@ -157,28 +162,56 @@ gameDecoder =
 
 view : Model -> Html Msg
 view model =
-    div []
-        [ div [] [ text <| "Current game: " ++ (Maybe.withDefault "(none)" <| Maybe.map .name model.currentGame) ]
-        , div [] [ text <| "subscribed: " ++ (Maybe.withDefault "(none)" model.subscribedMessage) ]
-        , gamesView model
-        ]
+    let
+        flexGrow x =
+            ( "flex-grow", toString x )
+    in
+        div [ A.style [ ( "display", "flex" ), ( "flex-direction", "column" ), ( "height", "100%" ) ] ]
+            [ div [ A.style [ ( "display", "flex" ) ] ]
+                [ strong [ A.style [ ( "padding-right", "10px" ), flexGrow 1 ] ] [ text "Space Elm!" ]
+                , div [ A.style [ flexGrow 1, ( "text-align", "center" ) ] ]
+                    [ text <| "Current game: "
+                    , gamesView model
+                    ]
+                , div [ A.style [ flexGrow 1, ( "text-align", "right" ) ] ]
+                    [ text <|
+                        if model.subscribedMessage == Nothing then
+                            "unsubscribed"
+                        else
+                            "subscribed!"
+                    ]
+                ]
+            , div [ A.style [ ( "flex-grow", "2" ) ] ]
+                [ gameView model ]
+            ]
 
 
 gamesView : Model -> Html Msg
 gamesView model =
-    case model.games of
-        NotAsked ->
-            div [] [ text "Not asked" ]
+    let
+        loading =
+            [ option [ A.disabled True ] [ text "Not Loaded" ] ]
 
-        Loading ->
-            div [] [ text "Loading" ]
+        opt i =
+            option
+                [ A.selected <| Maybe.withDefault False <| Maybe.map (gameHasId i.id) model.currentGame
+                , A.value <| toString i.id
+                ]
+                [ text i.name ]
+    in
+        select [ onInput <| ChooseGame ] <|
+            case model.games of
+                Success list ->
+                    option [ A.disabled True, A.selected (model.currentGame == Nothing) ] [ text "Select Game" ]
+                        :: List.map opt list
 
-        Failure e ->
-            div [] [ text <| toString e ]
+                _ ->
+                    loading
 
-        Success list ->
-            ul [] <|
-                List.map (\i -> li [] [ a [ onClick <| ChooseGame i.id, href "#" ] [ text i.name ] ]) list
+
+gameView : Model -> Html Msg
+gameView model =
+    div [] [ text "ohai" ]
 
 
 subscriptions : Model -> Sub Msg
