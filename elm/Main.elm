@@ -10,6 +10,13 @@ import RemoteData exposing (RemoteData(..), WebData)
 import ActionCable exposing (ActionCable)
 import ActionCable.Msg as ACMsg
 import ActionCable.Identifier as ID
+import Collage as C
+import Element
+import Color
+import Text
+import Time
+import AnimationFrame as AF
+import Random
 
 
 main : Program Never Model Msg
@@ -22,14 +29,33 @@ main =
         }
 
 
-type alias Game =
+type alias RemoteGame =
     { id : Int
     , name : String
     }
 
 
+type alias Game =
+    { metadata : RemoteGame
+    , me : Ship
+    , stars : List Star
+    }
+
+
+type alias Star =
+    { x : Float
+    , y : Float
+    , z : Float
+    }
+
+
+type alias Ship =
+    { position : Float
+    }
+
+
 type alias Model =
-    { games : WebData (List Game)
+    { games : WebData (List RemoteGame)
     , currentGame : Maybe Game
     , cable : ActionCable Msg
     , subscribedMessage : Maybe String
@@ -37,10 +63,12 @@ type alias Model =
 
 
 type Msg
-    = GamesRetrieved (Result Http.Error (List Game))
+    = GamesRetrieved (Result Http.Error (List RemoteGame))
+    | Tick Time.Time
     | ChooseGame String
     | CableMsg ACMsg.Msg
     | SubscriptionConfirmed ID.Identifier
+    | InitializeStars (List ( Float, Float, Float ))
 
 
 init : ( Model, Cmd Msg )
@@ -52,6 +80,14 @@ init =
       }
     , retrieveGames
     )
+
+
+initGame : RemoteGame -> Game
+initGame remoteGame =
+    { metadata = remoteGame
+    , me = { position = 0.0 }
+    , stars = []
+    }
 
 
 retrieveGames : Cmd Msg
@@ -92,6 +128,55 @@ update msg model =
         SubscriptionConfirmed id ->
             { model | subscribedMessage = Just <| toString id } ! []
 
+        InitializeStars randList ->
+            ( { model | currentGame = Maybe.map (setStars randList) model.currentGame }, Cmd.none )
+
+        Tick time ->
+            let
+                newGame =
+                    Maybe.map (tick time) model.currentGame
+            in
+                ( { model | currentGame = newGame }, Cmd.none )
+
+
+setStars : List ( Float, Float, Float ) -> Game -> Game
+setStars xyzs game =
+    let
+        setStar ( x, y, z ) =
+            Star x y z
+    in
+        { game
+            | stars = List.map setStar xyzs
+        }
+
+
+initializeStars : Cmd Msg
+initializeStars =
+    let
+        f a b =
+            Random.float a b
+    in
+        Random.generate InitializeStars (Random.list 20 <| Random.map3 (,,) (f -500 500) (f -250 250) (f 0.01 0.1))
+
+
+tick : Time.Time -> Game -> Game
+tick time game =
+    { game
+        | stars = List.map (tickStar time) game.stars
+    }
+
+
+tickStar : Time.Time -> Star -> Star
+tickStar time star =
+    let
+        newX =
+            star.x - time * star.z
+    in
+        if newX < -550 then
+            { star | x = 550 }
+        else
+            { star | x = newX }
+
 
 makeId : Int -> ID.Identifier
 makeId int =
@@ -120,38 +205,49 @@ subscribeToGame int model =
     in
         model.cable
             |> ActionCable.subscribeTo (makeId int)
-            |> Result.map (Tuple.mapFirst updateModel)
+            |> Result.map (\( m, c ) -> ( updateModel m, Cmd.batch [ c, initializeStars ] ))
 
 
-getGame : Int -> WebData (List Game) -> Maybe Game
+getGame : Int -> WebData (List RemoteGame) -> Maybe Game
 getGame int =
     RemoteData.withDefault []
         >> listGet int
+        >> Maybe.map initGame
 
 
 unsubscribeFromGame : Int -> Model -> ( Model, Cmd Msg )
 unsubscribeFromGame int model =
     (Result.fromMaybe ActionCable.ChannelNotSubscribedError model.currentGame)
         |> Result.andThen
-            (\g -> ActionCable.unsubscribeFrom (makeId g.id) model.cable)
+            (\g -> ActionCable.unsubscribeFrom (makeId (gameId g)) model.cable)
         |> Result.map (Tuple.mapFirst (\cable -> { model | cable = cable }))
         |> Result.withDefault ( model, Cmd.none )
 
 
-listGet : Int -> List Game -> Maybe Game
+listGet : Int -> List RemoteGame -> Maybe RemoteGame
 listGet id =
-    List.filter (gameHasId id)
+    List.filter (remoteGameHasId id)
         >> List.head
+
+
+remoteGameHasId : Int -> RemoteGame -> Bool
+remoteGameHasId int =
+    (.id >> (==) int)
 
 
 gameHasId : Int -> Game -> Bool
 gameHasId int =
-    (.id >> (==) int)
+    (gameId >> (==) int)
 
 
-gameDecoder : JD.Decoder Game
+gameId : Game -> Int
+gameId =
+    .metadata >> .id
+
+
+gameDecoder : JD.Decoder RemoteGame
 gameDecoder =
-    JD.map2 Game
+    JD.map2 RemoteGame
         (JD.field "id" JD.int)
         (JD.field "name" JD.string)
 
@@ -210,10 +306,50 @@ gamesView model =
 
 
 gameView : Model -> Html Msg
-gameView model =
-    div [] [ text "ohai" ]
+gameView { currentGame } =
+    Element.toHtml <|
+        C.collage 1000 500 <|
+            case currentGame of
+                Nothing ->
+                    noGame
+
+                Just game ->
+                    gameItems game
+
+
+noGame : List C.Form
+noGame =
+    [ space
+    , C.toForm <| Element.centered <| Text.color Color.lightGray <| Text.fromString "no game selected"
+    ]
+
+
+gameItems : Game -> List C.Form
+gameItems game =
+    List.concat
+        [ [ space ]
+        , List.map starView game.stars
+        ]
+
+
+space : C.Form
+space =
+    C.filled Color.black <| C.rect 1000 500
+
+
+starView : Star -> C.Form
+starView star =
+    C.circle 5
+        |> C.filled Color.lightGray
+        |> C.move ( star.x, star.y )
 
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    ActionCable.listen CableMsg model.cable
+    Sub.batch
+        [ ActionCable.listen CableMsg model.cable
+        , if model.currentGame == Nothing then
+            Sub.none
+          else
+            AF.diffs Tick
+        ]
