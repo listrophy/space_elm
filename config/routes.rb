@@ -1,6 +1,5 @@
 Rails.application.routes.draw do
   resources :games
-  resource :user
   root 'static#index'
 
 

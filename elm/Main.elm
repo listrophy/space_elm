@@ -2,7 +2,6 @@ module Main exposing (main)
 
 import Html exposing (..)
 import Html.Attributes as A exposing (href)
-import Http
 import Dict
 import Json.Decode as JD
 import ActionCable exposing (ActionCable)
@@ -28,12 +27,6 @@ main =
         }
 
 
-type alias Game =
-    { me : Player
-    , keysDown : Set.Set Keyboard.KeyCode
-    }
-
-
 type alias Position =
     { x : Float
     , y : Float
@@ -41,15 +34,13 @@ type alias Position =
 
 
 type alias Player =
-    { id : PlayerId
-    , position : Float
+    { position : Float
     , laser : Maybe Position
     }
 
 
 type alias Asteroid =
-    { id : AsteroidId
-    , position : Position
+    { position : Position
     }
 
 
@@ -60,62 +51,31 @@ type Key
 
 
 type alias Model =
-    { game : Maybe Game
-    , myId : Maybe Int
+    { me : Player
     , error : Maybe String
     , cable : ActionCable Msg
+    , keysDown : Set.Set Keyboard.KeyCode
     }
-
-
-type Msg
-    = CableMsg ACMsg.Msg
-    | ReceiveMyId (Result Http.Error Int)
-    | Tick Time.Time
-    | CableConnected ()
-    | GameJoined ID.Identifier
-    | KeyDown Keyboard.KeyCode
-    | KeyUp Keyboard.KeyCode
-    | DataReceived ID.Identifier JD.Value
-
-
-type alias AsteroidId =
-    Int
-
-
-type alias PlayerId =
-    Int
-
-
-type RemoteMsg
-    = TheyMoved Player
-    | TheyCollided PlayerId AsteroidId
-    | TheyShot PlayerId AsteroidId
-    | TheyReset Asteroid
 
 
 init : ( Model, Cmd Msg )
 init =
-    ( { game = Nothing
+    ( { me = Player 0.0 Nothing
       , error = Nothing
-      , myId = Nothing
       , cable = initCable
+      , keysDown = Set.empty
       }
-    , fetchUserId
+    , Cmd.none
     )
 
 
-fetchUserId : Cmd Msg
-fetchUserId =
-    Http.get "/user.json" (JD.field "id" JD.int)
-        |> Http.send ReceiveMyId
-
-
-initGame : PlayerId -> Maybe Game
-initGame int =
-    Just <|
-        { me = { id = int, position = 0.0, laser = Nothing }
-        , keysDown = Set.empty
-        }
+type Msg
+    = CableMsg ACMsg.Msg
+    | Tick Time.Time
+    | CableConnected ()
+    | KeyDown Keyboard.KeyCode
+    | KeyUp Keyboard.KeyCode
+    | DataReceived ID.Identifier JD.Value
 
 
 initCable : ActionCable Msg
@@ -123,7 +83,6 @@ initCable =
     ActionCable.initCable "ws://localhost:3000/cable"
         |> ActionCable.withDebug True
         |> ActionCable.onWelcome (Just CableConnected)
-        |> ActionCable.onConfirm (Just GameJoined)
         |> ActionCable.onDidReceiveData (Just DataReceived)
 
 
@@ -134,35 +93,20 @@ update msg model =
             ActionCable.update msg_ model.cable
                 |> Tuple.mapFirst (\c -> { model | cable = c })
 
-        ReceiveMyId (Ok id) ->
-            ( { model | myId = Just id }, Cmd.none )
-
-        ReceiveMyId (Err err) ->
-            ( { model | error = Just "could not fetch id" }, Cmd.none )
-
         CableConnected _ ->
             joinGame model
 
-        GameJoined _ ->
-            -- TODO: send tick
-            case model.myId of
-                Just id ->
-                    ( { model | game = initGame id }, Cmd.none )
-
-                Nothing ->
-                    ( model, Cmd.none )
-
         Tick time ->
-            ( setInGame (tick time) model, Cmd.none )
+            ( tick time model, Cmd.none )
 
         KeyDown 32 ->
-            fire model
+            fire model ! []
 
         KeyDown keyCode ->
-            ( setInGame (\g -> { g | keysDown = Set.insert keyCode g.keysDown }) model, Cmd.none )
+            ( { model | keysDown = Set.insert keyCode model.keysDown }, Cmd.none )
 
         KeyUp keyCode ->
-            ( setInGame (\g -> { g | keysDown = Set.remove keyCode g.keysDown }) model, Cmd.none )
+            ( { model | keysDown = Set.remove keyCode model.keysDown }, Cmd.none )
 
         DataReceived _ jsonValue ->
             ( dataReceived jsonValue model, Cmd.none )
@@ -170,113 +114,40 @@ update msg model =
 
 dataReceived : JD.Value -> Model -> Model
 dataReceived json model =
-    Debug.log "data received" json
-        |> decodeRemoteMsg
-        |> Maybe.map (runRemoteMsg model)
-        |> Maybe.withDefault model
+    model
 
 
-decodeRemoteMsg : JD.Value -> Maybe RemoteMsg
-decodeRemoteMsg value =
-    let
-        positionDecoder =
-            JD.map2 Position
-                (JD.field "x" JD.float)
-                (JD.field "y" JD.float)
-
-        playerDecoder =
-            JD.map3 Player
-                (JD.field "id" JD.int)
-                (JD.field "y" JD.float)
-                (JD.maybe <| JD.field "laser" positionDecoder)
-
-        asteroidDecoder =
-            JD.map2 Asteroid
-                (JD.field "id" JD.int)
-                positionDecoder
-    in
-        Result.toMaybe <|
-            case JD.decodeValue (JD.field "msg" JD.string) value of
-                Ok "asteroid_reset" ->
-                    JD.decodeValue asteroidDecoder value
-                        |> Result.map TheyReset
-
-                Ok "player_moved" ->
-                    JD.decodeValue playerDecoder value
-                        |> Result.map TheyMoved
-
-                Ok "collision" ->
-                    JD.decodeValue (JD.map2 TheyCollided (JD.field "player_id" JD.int) (JD.field "asteroid_id" JD.int)) value
-
-                Ok "destroy" ->
-                    JD.decodeValue (JD.map2 TheyShot (JD.field "player_id" JD.int) (JD.field "asteroid_id" JD.int)) value
-
-                _ ->
-                    Err "message not known"
-
-
-runRemoteMsg : Model -> RemoteMsg -> Model
-runRemoteMsg model remoteMsg =
-    case Debug.log "remote msg" remoteMsg of
-        TheyCollided player asteroid ->
-            model
-
-        TheyMoved player ->
-            model
-
-        TheyReset asteroid ->
-            model
-
-        TheyShot player asteroid ->
-            model
-
-
-setInGame : (Game -> Game) -> Model -> Model
-setInGame f model =
-    case model.game of
-        Nothing ->
-            model
-
-        Just g ->
-            { model | game = Just <| f g }
-
-
-fire : Model -> ( Model, Cmd Msg )
-fire model =
-    ( setInGame fireInGame model, Cmd.none )
-
-
-fireInGame : Game -> Game
-fireInGame ({ me } as game) =
+fire : Model -> Model
+fire ({ me } as model) =
     case me.laser of
         Nothing ->
-            { game | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
+            { model | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
 
         Just laser ->
             if laser.x < 500 then
-                game
+                model
             else
-                { game | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
+                { model | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
 
 
 leftEdge : Float
 leftEdge =
-    -450.0
+    -480.0
 
 
-tick : Time.Time -> Game -> Game
-tick time game =
-    game
+tick : Time.Time -> Model -> Model
+tick time model =
+    model
         |> doMove
 
 
-doMove : Game -> Game
-doMove ({ me } as game) =
+doMove : Model -> Model
+doMove ({ me } as model) =
     let
         moveMe =
-            if Set.member 38 game.keysDown then
+            if Set.member 38 model.keysDown then
                 2.0
-            else if Set.member 40 game.keysDown then
+            else if Set.member 40 model.keysDown then
                 -2.0
             else
                 0.0
@@ -287,7 +158,7 @@ doMove ({ me } as game) =
                 , laser = Maybe.map moveLaser me.laser
             }
     in
-        { game | me = newMe }
+        { model | me = newMe }
 
 
 moveLaser : Position -> Position
@@ -337,15 +208,10 @@ view model =
 
 
 gameView : Model -> Html Msg
-gameView { game } =
+gameView model =
     Element.toHtml <|
         C.collage 1000 500 <|
-            case game of
-                Nothing ->
-                    noGame
-
-                Just game ->
-                    gameItems game
+            gameItems model
 
 
 noGame : List C.Form
@@ -355,12 +221,12 @@ noGame =
     ]
 
 
-gameItems : Game -> List C.Form
-gameItems game =
+gameItems : Model -> List C.Form
+gameItems model =
     List.concat
         [ [ space ]
-        , [ meView game.me ]
-        , List.filterMap identity [ meLaserView game.me ]
+        , [ meView model.me ]
+        , List.filterMap identity [ meLaserView model.me ]
         ]
 
 
@@ -377,32 +243,21 @@ meView me =
 
 
 meLaserView : Player -> Maybe C.Form
-meLaserView player =
-    case player.laser of
-        Nothing ->
-            Nothing
-
-        Just laser ->
+meLaserView =
+    let
+        laserView laser =
             C.rect 20.0 2.0
                 |> C.filled Color.white
                 |> C.move ( laser.x, laser.y )
-                |> Just
+    in
+        .laser >> Maybe.map laserView
 
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    let
-        cableListener =
-            ActionCable.listen CableMsg model.cable
-    in
-        case model.game of
-            Nothing ->
-                cableListener
-
-            Just g ->
-                Sub.batch
-                    [ cableListener
-                    , AF.diffs Tick
-                    , Keyboard.downs KeyDown
-                    , Keyboard.ups KeyUp
-                    ]
+    Sub.batch
+        [ ActionCable.listen CableMsg model.cable
+        , AF.diffs Tick
+        , Keyboard.downs KeyDown
+        , Keyboard.ups KeyUp
+        ]
