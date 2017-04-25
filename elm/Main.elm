@@ -1,12 +1,10 @@
-module Main exposing (..)
+module Main exposing (main)
 
 import Html exposing (..)
 import Html.Attributes as A exposing (href)
-import Html.Events as E exposing (onInput, onClick)
 import Http
+import Dict
 import Json.Decode as JD
-import Rails
-import RemoteData exposing (RemoteData(..), WebData)
 import ActionCable exposing (ActionCable)
 import ActionCable.Msg as ACMsg
 import ActionCable.Identifier as ID
@@ -16,7 +14,8 @@ import Color
 import Text
 import Time
 import AnimationFrame as AF
-import Random
+import Keyboard
+import Set
 
 
 main : Program Never Model Msg
@@ -29,227 +28,269 @@ main =
         }
 
 
-type alias RemoteGame =
-    { id : Int
-    , name : String
-    }
-
-
 type alias Game =
-    { metadata : RemoteGame
-    , me : Ship
-    , stars : List Star
+    { me : Player
+    , keysDown : Set.Set Keyboard.KeyCode
     }
 
 
-type alias Star =
+type alias Position =
     { x : Float
     , y : Float
-    , z : Float
     }
 
 
-type alias Ship =
-    { position : Float
+type alias Player =
+    { id : PlayerId
+    , position : Float
+    , laser : Maybe Position
     }
+
+
+type alias Asteroid =
+    { id : AsteroidId
+    , position : Position
+    }
+
+
+type Key
+    = ArrowDown
+    | ArrowUp
+    | SpaceBar
 
 
 type alias Model =
-    { games : WebData (List RemoteGame)
-    , currentGame : Maybe Game
+    { game : Maybe Game
+    , myId : Maybe Int
+    , error : Maybe String
     , cable : ActionCable Msg
-    , subscribedMessage : Maybe String
     }
 
 
 type Msg
-    = GamesRetrieved (Result Http.Error (List RemoteGame))
+    = CableMsg ACMsg.Msg
+    | ReceiveMyId (Result Http.Error Int)
     | Tick Time.Time
-    | ChooseGame String
-    | CableMsg ACMsg.Msg
-    | SubscriptionConfirmed ID.Identifier
-    | InitializeStars (List ( Float, Float, Float ))
+    | CableConnected ()
+    | GameJoined ID.Identifier
+    | KeyDown Keyboard.KeyCode
+    | KeyUp Keyboard.KeyCode
+    | DataReceived ID.Identifier JD.Value
+
+
+type alias AsteroidId =
+    Int
+
+
+type alias PlayerId =
+    Int
+
+
+type RemoteMsg
+    = TheyMoved Player
+    | TheyCollided PlayerId AsteroidId
+    | TheyShot PlayerId AsteroidId
+    | TheyReset Asteroid
 
 
 init : ( Model, Cmd Msg )
 init =
-    ( { games = NotAsked
-      , currentGame = Nothing
+    ( { game = Nothing
+      , error = Nothing
+      , myId = Nothing
       , cable = initCable
-      , subscribedMessage = Nothing
       }
-    , retrieveGames
+    , fetchUserId
     )
 
 
-initGame : RemoteGame -> Game
-initGame remoteGame =
-    { metadata = remoteGame
-    , me = { position = 0.0 }
-    , stars = []
-    }
+fetchUserId : Cmd Msg
+fetchUserId =
+    Http.get "/user.json" (JD.field "id" JD.int)
+        |> Http.send ReceiveMyId
 
 
-retrieveGames : Cmd Msg
-retrieveGames =
-    JD.list gameDecoder
-        |> Rails.get "/games"
-        |> Http.send GamesRetrieved
+initGame : PlayerId -> Maybe Game
+initGame int =
+    Just <|
+        { me = { id = int, position = 0.0, laser = Nothing }
+        , keysDown = Set.empty
+        }
 
 
 initCable : ActionCable Msg
 initCable =
     ActionCable.initCable "ws://localhost:3000/cable"
         |> ActionCable.withDebug True
-        |> ActionCable.onConfirm (Just SubscriptionConfirmed)
+        |> ActionCable.onWelcome (Just CableConnected)
+        |> ActionCable.onConfirm (Just GameJoined)
+        |> ActionCable.onDidReceiveData (Just DataReceived)
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        GamesRetrieved r ->
-            { model | games = RemoteData.fromResult r } ! []
-
-        ChooseGame str ->
-            case Result.toMaybe <| String.toInt str of
-                Just int ->
-                    if Maybe.withDefault False <| Maybe.map (gameHasId int) model.currentGame then
-                        ( model, Cmd.none )
-                    else
-                        chooseGame int model
-
-                Nothing ->
-                    ( model, Cmd.none )
-
         CableMsg msg_ ->
             ActionCable.update msg_ model.cable
                 |> Tuple.mapFirst (\c -> { model | cable = c })
 
-        SubscriptionConfirmed id ->
-            { model | subscribedMessage = Just <| toString id } ! []
+        ReceiveMyId (Ok id) ->
+            ( { model | myId = Just id }, Cmd.none )
 
-        InitializeStars randList ->
-            ( { model | currentGame = Maybe.map (setStars randList) model.currentGame }, Cmd.none )
+        ReceiveMyId (Err err) ->
+            ( { model | error = Just "could not fetch id" }, Cmd.none )
+
+        CableConnected _ ->
+            joinGame model
+
+        GameJoined _ ->
+            -- TODO: send tick
+            case model.myId of
+                Just id ->
+                    ( { model | game = initGame id }, Cmd.none )
+
+                Nothing ->
+                    ( model, Cmd.none )
 
         Tick time ->
             let
                 newGame =
-                    Maybe.map (tick time) model.currentGame
+                    Maybe.map (tick time) model.game
             in
-                ( { model | currentGame = newGame }, Cmd.none )
+                ( { model | game = newGame }, Cmd.none )
+
+        KeyDown keyCode ->
+            ( setInGame (\g -> { g | keysDown = Set.insert keyCode g.keysDown }) model, Cmd.none )
+
+        KeyUp keyCode ->
+            ( setInGame (\g -> { g | keysDown = Set.remove keyCode g.keysDown }) model, Cmd.none )
+
+        DataReceived _ jsonValue ->
+            ( dataReceived jsonValue model, Cmd.none )
 
 
-setStars : List ( Float, Float, Float ) -> Game -> Game
-setStars xyzs game =
+dataReceived : JD.Value -> Model -> Model
+dataReceived json model =
+    Debug.log "data received" json
+        |> decodeRemoteMsg
+        |> Maybe.map (runRemoteMsg model)
+        |> Maybe.withDefault model
+
+
+decodeRemoteMsg : JD.Value -> Maybe RemoteMsg
+decodeRemoteMsg value =
     let
-        setStar ( x, y, z ) =
-            Star x y z
+        positionDecoder =
+            JD.map2 Position
+                (JD.field "x" JD.float)
+                (JD.field "y" JD.float)
+
+        playerDecoder =
+            JD.map3 Player
+                (JD.field "id" JD.int)
+                (JD.field "y" JD.float)
+                (JD.maybe <| JD.field "laser" positionDecoder)
+
+        asteroidDecoder =
+            JD.map2 Asteroid
+                (JD.field "id" JD.int)
+                positionDecoder
     in
-        { game
-            | stars = List.map setStar xyzs
-        }
+        Result.toMaybe <|
+            case JD.decodeValue (JD.field "msg" JD.string) value of
+                Ok "asteroid_reset" ->
+                    JD.decodeValue asteroidDecoder value
+                        |> Result.map TheyReset
+
+                Ok "player_moved" ->
+                    JD.decodeValue playerDecoder value
+                        |> Result.map TheyMoved
+
+                Ok "collision" ->
+                    JD.decodeValue (JD.map2 TheyCollided (JD.field "player_id" JD.int) (JD.field "asteroid_id" JD.int)) value
+
+                Ok "destroy" ->
+                    JD.decodeValue (JD.map2 TheyShot (JD.field "player_id" JD.int) (JD.field "asteroid_id" JD.int)) value
+
+                _ ->
+                    Err "message not known"
 
 
-initializeStars : Cmd Msg
-initializeStars =
-    let
-        f a b =
-            Random.float a b
-    in
-        Random.generate InitializeStars (Random.list 20 <| Random.map3 (,,) (f -500 500) (f -250 250) (f 0.01 0.1))
+runRemoteMsg : Model -> RemoteMsg -> Model
+runRemoteMsg model remoteMsg =
+    case Debug.log "remote msg" remoteMsg of
+        TheyCollided player asteroid ->
+            model
+
+        TheyMoved player ->
+            model
+
+        TheyReset asteroid ->
+            model
+
+        TheyShot player asteroid ->
+            model
+
+
+setInGame : (Game -> Game) -> Model -> Model
+setInGame f model =
+    case model.game of
+        Nothing ->
+            model
+
+        Just g ->
+            { model | game = Just <| f g }
+
+
+fire : Model -> ( Model, Cmd Msg )
+fire model =
+    ( setInGame fireInGame model, Cmd.none )
+
+
+fireInGame : Game -> Game
+fireInGame game =
+    game
 
 
 tick : Time.Time -> Game -> Game
 tick time game =
-    { game
-        | stars = List.map (tickStar time) game.stars
-    }
+    game
+        |> doMove
 
 
-tickStar : Time.Time -> Star -> Star
-tickStar time star =
+doMove : Game -> Game
+doMove ({ me } as game) =
     let
-        newX =
-            star.x - time * star.z
+        moveMe =
+            if Set.member 38 game.keysDown then
+                2.0
+            else if Set.member 40 game.keysDown then
+                -2.0
+            else
+                0.0
     in
-        if newX < -550 then
-            { star | x = 550 }
-        else
-            { star | x = newX }
+        { game | me = { me | position = me.position + moveMe } }
 
 
-makeId : Int -> ID.Identifier
-makeId int =
-    ID.newIdentifier "GamesChannel" [ ( "id", toString int ) ]
+identifier : ID.Identifier
+identifier =
+    ID.newIdentifier "GamesChannel" []
 
 
-chooseGame : Int -> Model -> ( Model, Cmd Msg )
-chooseGame int model =
-    let
-        ( unsubModel, unsubCmd ) =
-            unsubscribeFromGame int model
-    in
-        case subscribeToGame int unsubModel of
-            Ok ( newModel, subCmd ) ->
-                newModel ! [ unsubCmd, subCmd ]
+joinGame : Model -> ( Model, Cmd Msg )
+joinGame model =
+    case subscribeToGame model of
+        Ok model_cmd ->
+            model_cmd
 
-            Err err ->
-                { model | subscribedMessage = Just <| ActionCable.errorToString err } ! []
+        Err err ->
+            ( { model | error = Just <| ActionCable.errorToString err }, Cmd.none )
 
 
-subscribeToGame : Int -> Model -> Result ActionCable.ActionCableError ( Model, Cmd Msg )
-subscribeToGame int model =
-    let
-        updateModel cable =
-            { model | cable = cable, currentGame = getGame int model.games }
-    in
-        model.cable
-            |> ActionCable.subscribeTo (makeId int)
-            |> Result.map (\( m, c ) -> ( updateModel m, Cmd.batch [ c, initializeStars ] ))
-
-
-getGame : Int -> WebData (List RemoteGame) -> Maybe Game
-getGame int =
-    RemoteData.withDefault []
-        >> listGet int
-        >> Maybe.map initGame
-
-
-unsubscribeFromGame : Int -> Model -> ( Model, Cmd Msg )
-unsubscribeFromGame int model =
-    (Result.fromMaybe ActionCable.ChannelNotSubscribedError model.currentGame)
-        |> Result.andThen
-            (\g -> ActionCable.unsubscribeFrom (makeId (gameId g)) model.cable)
-        |> Result.map (Tuple.mapFirst (\cable -> { model | cable = cable }))
-        |> Result.withDefault ( model, Cmd.none )
-
-
-listGet : Int -> List RemoteGame -> Maybe RemoteGame
-listGet id =
-    List.filter (remoteGameHasId id)
-        >> List.head
-
-
-remoteGameHasId : Int -> RemoteGame -> Bool
-remoteGameHasId int =
-    (.id >> (==) int)
-
-
-gameHasId : Int -> Game -> Bool
-gameHasId int =
-    (gameId >> (==) int)
-
-
-gameId : Game -> Int
-gameId =
-    .metadata >> .id
-
-
-gameDecoder : JD.Decoder RemoteGame
-gameDecoder =
-    JD.map2 RemoteGame
-        (JD.field "id" JD.int)
-        (JD.field "name" JD.string)
+subscribeToGame : Model -> Result ActionCable.ActionCableError ( Model, Cmd Msg )
+subscribeToGame model =
+    ActionCable.subscribeTo identifier model.cable
+        |> Result.map (\( cable, cmd ) -> ( { model | cable = cable }, cmd ))
 
 
 
@@ -258,58 +299,25 @@ gameDecoder =
 
 view : Model -> Html Msg
 view model =
-    let
-        flexGrow x =
-            ( "flex-grow", toString x )
-    in
-        div [ A.style [ ( "display", "flex" ), ( "flex-direction", "column" ), ( "height", "100%" ) ] ]
-            [ div [ A.style [ ( "display", "flex" ) ] ]
-                [ strong [ A.style [ ( "padding-right", "10px" ), flexGrow 1 ] ] [ text "Space Elm!" ]
-                , div [ A.style [ flexGrow 1, ( "text-align", "center" ) ] ]
-                    [ text <| "Current game: "
-                    , gamesView model
-                    ]
-                , div [ A.style [ flexGrow 1, ( "text-align", "right" ) ] ]
-                    [ text <|
-                        if model.subscribedMessage == Nothing then
-                            "unsubscribed"
-                        else
-                            "subscribed!"
-                    ]
-                ]
-            , div [ A.style [ ( "flex-grow", "2" ) ] ]
-                [ gameView model ]
+    div [ A.style [ ( "display", "flex" ), ( "flex-direction", "column" ), ( "height", "100%" ) ] ]
+        [ div []
+            [ text <|
+                if Dict.isEmpty <| ActionCable.subscriptions model.cable then
+                    "unsubscribed"
+                else
+                    "subscribed!"
+            , text <| Maybe.withDefault "" model.error
             ]
-
-
-gamesView : Model -> Html Msg
-gamesView model =
-    let
-        loading =
-            [ option [ A.disabled True ] [ text "Not Loaded" ] ]
-
-        opt i =
-            option
-                [ A.selected <| Maybe.withDefault False <| Maybe.map (gameHasId i.id) model.currentGame
-                , A.value <| toString i.id
-                ]
-                [ text i.name ]
-    in
-        select [ onInput <| ChooseGame ] <|
-            case model.games of
-                Success list ->
-                    option [ A.disabled True, A.selected (model.currentGame == Nothing) ] [ text "Select Game" ]
-                        :: List.map opt list
-
-                _ ->
-                    loading
+        , div [ A.style [ ( "flex-grow", "2" ) ] ]
+            [ gameView model ]
+        ]
 
 
 gameView : Model -> Html Msg
-gameView { currentGame } =
+gameView { game } =
     Element.toHtml <|
         C.collage 1000 500 <|
-            case currentGame of
+            case game of
                 Nothing ->
                     noGame
 
@@ -320,7 +328,7 @@ gameView { currentGame } =
 noGame : List C.Form
 noGame =
     [ space
-    , C.toForm <| Element.centered <| Text.color Color.lightGray <| Text.fromString "no game selected"
+    , C.toForm <| Element.centered <| Text.color Color.lightGray <| Text.fromString "game not loaded"
     ]
 
 
@@ -328,7 +336,7 @@ gameItems : Game -> List C.Form
 gameItems game =
     List.concat
         [ [ space ]
-        , List.map starView game.stars
+        , [ meView game.me ]
         ]
 
 
@@ -337,19 +345,27 @@ space =
     C.filled Color.black <| C.rect 1000 500
 
 
-starView : Star -> C.Form
-starView star =
-    C.circle 5
-        |> C.filled Color.lightGray
-        |> C.move ( star.x, star.y )
+meView : Player -> C.Form
+meView me =
+    C.square 20
+        |> C.filled Color.white
+        |> C.move ( -440, (250.0 / 100.0 * me.position) )
 
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    Sub.batch
-        [ ActionCable.listen CableMsg model.cable
-        , if model.currentGame == Nothing then
-            Sub.none
-          else
-            AF.diffs Tick
-        ]
+    let
+        cableListener =
+            ActionCable.listen CableMsg model.cable
+    in
+        case model.game of
+            Nothing ->
+                cableListener
+
+            Just g ->
+                Sub.batch
+                    [ cableListener
+                    , AF.diffs Tick
+                    , Keyboard.downs KeyDown
+                    , Keyboard.ups KeyUp
+                    ]
