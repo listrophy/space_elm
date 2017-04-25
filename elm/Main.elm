@@ -153,11 +153,10 @@ update msg model =
                     ( model, Cmd.none )
 
         Tick time ->
-            let
-                newGame =
-                    Maybe.map (tick time) model.game
-            in
-                ( { model | game = newGame }, Cmd.none )
+            ( setInGame (tick time) model, Cmd.none )
+
+        KeyDown 32 ->
+            fire model
 
         KeyDown keyCode ->
             ( setInGame (\g -> { g | keysDown = Set.insert keyCode g.keysDown }) model, Cmd.none )
@@ -248,8 +247,21 @@ fire model =
 
 
 fireInGame : Game -> Game
-fireInGame game =
-    game
+fireInGame ({ me } as game) =
+    case me.laser of
+        Nothing ->
+            { game | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
+
+        Just laser ->
+            if laser.x < 500 then
+                game
+            else
+                { game | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
+
+
+leftEdge : Float
+leftEdge =
+    -450.0
 
 
 tick : Time.Time -> Game -> Game
@@ -268,8 +280,19 @@ doMove ({ me } as game) =
                 -2.0
             else
                 0.0
+
+        newMe =
+            { me
+                | position = me.position + moveMe
+                , laser = Maybe.map moveLaser me.laser
+            }
     in
-        { game | me = { me | position = me.position + moveMe } }
+        { game | me = newMe }
+
+
+moveLaser : Position -> Position
+moveLaser { x, y } =
+    { x = x + 5, y = y }
 
 
 identifier : ID.Identifier
@@ -337,6 +360,7 @@ gameItems game =
     List.concat
         [ [ space ]
         , [ meView game.me ]
+        , List.filterMap identity [ meLaserView game.me ]
         ]
 
 
@@ -349,7 +373,20 @@ meView : Player -> C.Form
 meView me =
     C.square 20
         |> C.filled Color.white
-        |> C.move ( -440, (250.0 / 100.0 * me.position) )
+        |> C.move ( leftEdge, (250.0 / 100.0 * me.position) )
+
+
+meLaserView : Player -> Maybe C.Form
+meLaserView player =
+    case player.laser of
+        Nothing ->
+            Nothing
+
+        Just laser ->
+            C.rect 20.0 2.0
+                |> C.filled Color.white
+                |> C.move ( laser.x, laser.y )
+                |> Just
 
 
 subscriptions : Model -> Sub Msg
