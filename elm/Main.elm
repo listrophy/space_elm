@@ -33,11 +33,6 @@ type alias Position =
     }
 
 
-type alias Asteroid =
-    { position : Position
-    }
-
-
 type Key
     = ArrowDown
     | ArrowUp
@@ -47,6 +42,7 @@ type Key
 type alias Model =
     { myPosition : Float
     , laser : Maybe Position
+    , asteroids : List Position
     , error : Maybe String
     , cable : ActionCable Msg
     , keysDown : Set.Set Keyboard.KeyCode
@@ -57,11 +53,13 @@ init : ( Model, Cmd Msg )
 init =
     ( { myPosition = 0.0
       , laser = Nothing
+      , asteroids = []
       , error = Nothing
       , cable = initCable
       , keysDown = Set.empty
       }
     , Cmd.none
+      -- TODO: generate asteroids
     )
 
 
@@ -93,7 +91,7 @@ update msg model =
             joinGame model
 
         Tick time ->
-            ( tick time model, Cmd.none )
+            tick time model
 
         KeyDown 32 ->
             fire model ! []
@@ -135,10 +133,11 @@ leftEdge =
     -480.0
 
 
-tick : Time.Time -> Model -> Model
+tick : Time.Time -> Model -> ( Model, Cmd Msg )
 tick time model =
     model
         |> doMove
+        |> flip (!) []
 
 
 doMove : Model -> Model
