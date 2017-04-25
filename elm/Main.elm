@@ -33,12 +33,6 @@ type alias Position =
     }
 
 
-type alias Player =
-    { position : Float
-    , laser : Maybe Position
-    }
-
-
 type alias Asteroid =
     { position : Position
     }
@@ -51,7 +45,8 @@ type Key
 
 
 type alias Model =
-    { me : Player
+    { myPosition : Float
+    , laser : Maybe Position
     , error : Maybe String
     , cable : ActionCable Msg
     , keysDown : Set.Set Keyboard.KeyCode
@@ -60,7 +55,8 @@ type alias Model =
 
 init : ( Model, Cmd Msg )
 init =
-    ( { me = Player 0.0 Nothing
+    ( { myPosition = 0.0
+      , laser = Nothing
       , error = Nothing
       , cable = initCable
       , keysDown = Set.empty
@@ -118,16 +114,20 @@ dataReceived json model =
 
 
 fire : Model -> Model
-fire ({ me } as model) =
-    case me.laser of
-        Nothing ->
-            { model | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
+fire ({ laser, myPosition } as model) =
+    let
+        newLaser =
+            Just <| Position leftEdge (2.5 * myPosition)
+    in
+        case laser of
+            Nothing ->
+                { model | laser = newLaser }
 
-        Just laser ->
-            if laser.x < 500 then
-                model
-            else
-                { model | me = { me | laser = Just <| Position leftEdge (2.5 * me.position) } }
+            Just laser ->
+                if laser.x < 500 then
+                    model
+                else
+                    { model | laser = newLaser }
 
 
 leftEdge : Float
@@ -142,7 +142,7 @@ tick time model =
 
 
 doMove : Model -> Model
-doMove ({ me } as model) =
+doMove ({ myPosition } as model) =
     let
         moveMe =
             if Set.member 38 model.keysDown then
@@ -151,14 +151,11 @@ doMove ({ me } as model) =
                 -2.0
             else
                 0.0
-
-        newMe =
-            { me
-                | position = me.position + moveMe
-                , laser = Maybe.map moveLaser me.laser
-            }
     in
-        { model | me = newMe }
+        { model
+            | myPosition = myPosition + moveMe
+            , laser = Maybe.map moveLaser model.laser
+        }
 
 
 moveLaser : Position -> Position
@@ -225,8 +222,8 @@ gameItems : Model -> List C.Form
 gameItems model =
     List.concat
         [ [ space ]
-        , [ meView model.me ]
-        , List.filterMap identity [ meLaserView model.me ]
+        , [ meView model.myPosition ]
+        , List.filterMap identity [ meLaserView model.laser ]
         ]
 
 
@@ -235,14 +232,14 @@ space =
     C.filled Color.black <| C.rect 1000 500
 
 
-meView : Player -> C.Form
-meView me =
+meView : Float -> C.Form
+meView myPosition =
     C.square 20
         |> C.filled Color.white
-        |> C.move ( leftEdge, (250.0 / 100.0 * me.position) )
+        |> C.move ( leftEdge, (250.0 / 100.0 * myPosition) )
 
 
-meLaserView : Player -> Maybe C.Form
+meLaserView : Maybe Position -> Maybe C.Form
 meLaserView =
     let
         laserView laser =
@@ -250,7 +247,7 @@ meLaserView =
                 |> C.filled Color.white
                 |> C.move ( laser.x, laser.y )
     in
-        .laser >> Maybe.map laserView
+        Maybe.map laserView
 
 
 subscriptions : Model -> Sub Msg
