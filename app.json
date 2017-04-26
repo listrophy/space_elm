@@ -4,6 +4,9 @@
     "env": {
         "ELM_COMPILE": "elm make elm/Main.elm --output public/elm.js"
     },
+    "addons": [
+      "redistogo:nano"
+    ],
     "buildpacks": [
         {
             "url": "https://github.com/heroku/heroku-buildpack-nodejs.git"
