@@ -1,0 +1,8 @@
+{
+  "name": "SpaceElm",
+  "description": "a game",
+  "version": "1.0.0",
+  "engines": {
+    "node": "6.9.4"
+  }
+}
