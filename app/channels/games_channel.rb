@@ -1,9 +1,20 @@
 class GamesChannel < ApplicationCable::Channel
   def subscribed
-    @game = Game.find_by id: 1
-    stream_for @game
+    stream_for game
+  end
+
+  def scoreUpdate(data)
+    g = game
+    g.update score: (g.score + data['score'])
+    self.class.broadcast_to g, {score: g.score}
   end
 
   def unsubscribed
+  end
+
+  private
+
+  def game
+    Game.find_by id: 1
   end
 end

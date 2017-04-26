@@ -3,6 +3,7 @@ module Main exposing (main)
 import Html exposing (..)
 import Dict
 import Json.Decode as JD
+import Json.Encode as JE
 import ActionCable exposing (ActionCable)
 import ActionCable.Msg as ACMsg
 import ActionCable.Identifier as ID
@@ -14,6 +15,7 @@ import Time
 import AnimationFrame as AF
 import Keyboard
 import Set
+import Random
 
 
 main : Program Never Model Msg
@@ -59,8 +61,7 @@ init =
       , cable = initCable
       , keysDown = Set.empty
       }
-    , Cmd.none
-      -- TODO: generate asteroids
+    , requestRandomAsteroidPositions
     )
 
 
@@ -71,6 +72,7 @@ type Msg
     | KeyDown Keyboard.KeyCode
     | KeyUp Keyboard.KeyCode
     | DataReceived ID.Identifier JD.Value
+    | GenerateAsteroid Position
 
 
 initCable : ActionCable Msg
@@ -79,6 +81,26 @@ initCable =
         |> ActionCable.withDebug True
         |> ActionCable.onWelcome (Just CableConnected)
         |> ActionCable.onDidReceiveData (Just DataReceived)
+
+
+requestRandomAsteroidPosition : Random.Generator Position
+requestRandomAsteroidPosition =
+    let
+        xGenerator =
+            Random.float 500.0 1500.0
+
+        yGenerator =
+            Random.float -220.0 220.0
+    in
+        Random.pair xGenerator yGenerator
+            |> Random.map (\( x, y ) -> { x = x, y = y })
+
+
+requestRandomAsteroidPositions : Cmd Msg
+requestRandomAsteroidPositions =
+    Random.generate GenerateAsteroid requestRandomAsteroidPosition
+        |> List.repeat 12
+        |> Cmd.batch
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -105,6 +127,9 @@ update msg model =
 
         DataReceived _ jsonValue ->
             ( dataReceived jsonValue model, Cmd.none )
+
+        GenerateAsteroid position ->
+            { model | asteroids = position :: model.asteroids } ! []
 
 
 dataReceived : JD.Value -> Model -> Model
@@ -140,12 +165,37 @@ leftEdge =
 tick : Time.Time -> Model -> ( Model, Cmd Msg )
 tick time model =
     model
-        |> doMove
-        |> flip (!) []
+        |> moveShip
+        |> moveAsteroids
+        |> blowUpAsteroid
+        |> postScore
+        |> (\( m, a, cmd ) -> ( m, regenerateAsteroids a cmd ))
 
 
-doMove : Model -> Model
-doMove ({ myPosition } as model) =
+postScore : ( Model, List Position, List Position ) -> ( Model, List Position, Cmd Msg )
+postScore ( model, past, blownUp ) =
+    ( model, List.append past blownUp, sendScoreUpdate (List.length blownUp) model.cable )
+
+
+sendScoreUpdate : Int -> ActionCable Msg -> Cmd Msg
+sendScoreUpdate int cable =
+    if int > 0 then
+        ActionCable.perform "scoreUpdate" [ ( "score", JE.int int ) ] identifier cable
+            |> Result.withDefault Cmd.none
+    else
+        Cmd.none
+
+
+regenerateAsteroids : List Position -> Cmd Msg -> Cmd Msg
+regenerateAsteroids asteroids cmd =
+    asteroids
+        |> List.map (\_ -> Random.generate GenerateAsteroid requestRandomAsteroidPosition)
+        |> (::) cmd
+        |> Cmd.batch
+
+
+moveShip : Model -> Model
+moveShip ({ myPosition } as model) =
     let
         moveMe =
             if Set.member 38 model.keysDown then
@@ -164,6 +214,47 @@ doMove ({ myPosition } as model) =
 moveLaser : Position -> Position
 moveLaser { x, y } =
     { x = x + 10, y = y }
+
+
+moveAsteroids : Model -> ( Model, List Position )
+moveAsteroids model =
+    let
+        move { x, y } =
+            { x = x - 1, y = y }
+
+        ( kept, past ) =
+            model.asteroids
+                |> List.map move
+                |> List.partition (\pos -> pos.x > leftEdge - 50)
+    in
+        ( { model | asteroids = kept }, past )
+
+
+blowUpAsteroid : ( Model, List Position ) -> ( Model, List Position, List Position )
+blowUpAsteroid ( model, past ) =
+    case model.laser of
+        Nothing ->
+            ( model, past, [] )
+
+        Just laser ->
+            let
+                ( blownUp, stickAround ) =
+                    List.partition (detectCollision laser) model.asteroids
+            in
+                if List.length blownUp > 0 then
+                    ( { model | asteroids = stickAround, laser = Nothing }, past, blownUp )
+                else
+                    ( model, past, [] )
+
+
+detectCollision : Position -> Position -> Bool
+detectCollision laser asteroid =
+    asteroidRadius > (sqrt <| (asteroid.x - laser.x) ^ 2 + (asteroid.y - laser.y) ^ 2)
+
+
+asteroidRadius : Float
+asteroidRadius =
+    30.0
 
 
 identifier : ID.Identifier
@@ -204,15 +295,17 @@ gameItems model =
         [ [ space
           , connectedSignal model
           , scoreView model.score
-          , meView model.myPosition
+          , shipView model.myPosition
           ]
-        , List.filterMap identity [ meLaserView model.laser ]
+        , List.map asteroidView model.asteroids
+        , Maybe.withDefault [] <| Maybe.map (laserView >> List.singleton) model.laser
         ]
 
 
 space : C.Form
 space =
-    C.filled Color.black <| C.rect 1000 500
+    C.rect 1000 500
+        |> C.filled Color.black
 
 
 connectedSignal : Model -> C.Form
@@ -242,22 +335,29 @@ scoreView int =
         |> C.move (( 420.0, 240 ))
 
 
-meView : Float -> C.Form
-meView myPosition =
+shipView : Float -> C.Form
+shipView myPosition =
     C.polygon [ ( -10, -5 ), ( -10, 5 ), ( 10, 0 ) ]
         |> C.filled Color.white
         |> C.move ( leftEdge, (250.0 / 100.0 * myPosition) )
 
 
-meLaserView : Maybe Position -> Maybe C.Form
-meLaserView =
-    let
-        laserView laser =
-            C.rect 20.0 2.0
-                |> C.filled Color.white
-                |> C.move ( laser.x, laser.y )
-    in
-        Maybe.map laserView
+laserView : Position -> C.Form
+laserView laser =
+    C.rect 20.0 2.0
+        |> C.filled Color.white
+        |> C.move ( laser.x, laser.y )
+
+
+asteroidView : Position -> C.Form
+asteroidView position =
+    C.ngon 7 asteroidRadius
+        |> C.filled Color.gray
+        |> C.move ( position.x, position.y )
+
+
+
+--
 
 
 subscriptions : Model -> Sub Msg
