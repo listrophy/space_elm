@@ -65,7 +65,7 @@ init =
 
 initCable : ActionCable Msg
 initCable =
-    ActionCable.initCable "ws://localhost:3000/cable"
+    ActionCable.initCable "ws://quiet-scrubland-56805.herokuapp.com/cable"
         |> ActionCable.withDebug True
         |> ActionCable.onWelcome (Just CableConnected)
         |> ActionCable.onDidReceiveData (Just DataReceived)
