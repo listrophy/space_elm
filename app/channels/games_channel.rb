@@ -15,6 +15,6 @@ class GamesChannel < ApplicationCable::Channel
   private
 
   def game
-    Game.find_by id: 1
+    Game.first || Game.create
   end
 end
