@@ -25,6 +25,10 @@ In another terminal, run:
 
     $ rails s
 
+## Deploy to Heroku
+
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
+
 ## License
 
 See the LICENSE file in this repository.
