@@ -1,7 +1,6 @@
 module Main exposing (main)
 
 import Html exposing (..)
-import Html.Attributes as A exposing (href)
 import Dict
 import Json.Decode as JD
 import ActionCable exposing (ActionCable)
@@ -43,6 +42,7 @@ type alias Model =
     { myPosition : Float
     , laser : Maybe Position
     , asteroids : List Position
+    , score : Maybe Int
     , error : Maybe String
     , cable : ActionCable Msg
     , keysDown : Set.Set Keyboard.KeyCode
@@ -54,6 +54,7 @@ init =
     ( { myPosition = 0.0
       , laser = Nothing
       , asteroids = []
+      , score = Nothing
       , error = Nothing
       , cable = initCable
       , keysDown = Set.empty
@@ -108,7 +109,10 @@ update msg model =
 
 dataReceived : JD.Value -> Model -> Model
 dataReceived json model =
-    model
+    json
+        |> JD.decodeValue (JD.field "score" JD.int)
+        |> Result.toMaybe
+        |> (\score -> { model | score = score })
 
 
 fire : Model -> Model
@@ -159,7 +163,7 @@ doMove ({ myPosition } as model) =
 
 moveLaser : Position -> Position
 moveLaser { x, y } =
-    { x = x + 5, y = y }
+    { x = x + 10, y = y }
 
 
 identifier : ID.Identifier
@@ -189,39 +193,19 @@ subscribeToGame model =
 
 view : Model -> Html Msg
 view model =
-    div [ A.style [ ( "display", "flex" ), ( "flex-direction", "column" ), ( "height", "100%" ) ] ]
-        [ div []
-            [ text <|
-                if Dict.isEmpty <| ActionCable.subscriptions model.cable then
-                    "unsubscribed"
-                else
-                    "subscribed!"
-            , text <| Maybe.withDefault "" model.error
-            ]
-        , div [ A.style [ ( "flex-grow", "2" ) ] ]
-            [ gameView model ]
-        ]
-
-
-gameView : Model -> Html Msg
-gameView model =
     Element.toHtml <|
         C.collage 1000 500 <|
             gameItems model
 
 
-noGame : List C.Form
-noGame =
-    [ space
-    , C.toForm <| Element.centered <| Text.color Color.lightGray <| Text.fromString "game not loaded"
-    ]
-
-
 gameItems : Model -> List C.Form
 gameItems model =
     List.concat
-        [ [ space ]
-        , [ meView model.myPosition ]
+        [ [ space
+          , connectedSignal model
+          , scoreView model.score
+          , meView model.myPosition
+          ]
         , List.filterMap identity [ meLaserView model.laser ]
         ]
 
@@ -231,9 +215,36 @@ space =
     C.filled Color.black <| C.rect 1000 500
 
 
+connectedSignal : Model -> C.Form
+connectedSignal model =
+    let
+        colorFill =
+            if Dict.isEmpty <| ActionCable.subscriptions model.cable then
+                Color.gray
+            else
+                Color.green
+    in
+        C.circle 5.0
+            |> C.filled colorFill
+            |> C.move ( 490, -240 )
+
+
+scoreView : Maybe Int -> C.Form
+scoreView int =
+    int
+        |> Maybe.map toString
+        |> Maybe.withDefault "?"
+        |> (++) "Score: "
+        |> Text.fromString
+        |> Text.color Color.white
+        |> Element.rightAligned
+        |> C.toForm
+        |> C.move (( 420.0, 240 ))
+
+
 meView : Float -> C.Form
 meView myPosition =
-    C.square 20
+    C.polygon [ ( -10, -5 ), ( -10, 5 ), ( 10, 0 ) ]
         |> C.filled Color.white
         |> C.move ( leftEdge, (250.0 / 100.0 * myPosition) )
 
