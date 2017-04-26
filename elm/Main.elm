@@ -28,16 +28,14 @@ main =
         }
 
 
+
+-- MODEL
+
+
 type alias Position =
     { x : Float
     , y : Float
     }
-
-
-type Key
-    = ArrowDown
-    | ArrowUp
-    | SpaceBar
 
 
 type alias Model =
@@ -65,16 +63,6 @@ init =
     )
 
 
-type Msg
-    = CableMsg ACMsg.Msg
-    | Tick Time.Time
-    | CableConnected ()
-    | KeyDown Keyboard.KeyCode
-    | KeyUp Keyboard.KeyCode
-    | DataReceived ID.Identifier JD.Value
-    | GenerateAsteroid Position
-
-
 initCable : ActionCable Msg
 initCable =
     ActionCable.initCable "ws://localhost:3000/cable"
@@ -83,8 +71,12 @@ initCable =
         |> ActionCable.onDidReceiveData (Just DataReceived)
 
 
-requestRandomAsteroidPosition : Random.Generator Position
-requestRandomAsteroidPosition =
+
+-- Randomness request
+
+
+asteroidPositionGenerator : Random.Generator Position
+asteroidPositionGenerator =
     let
         xGenerator =
             Random.float 500.0 1500.0
@@ -92,15 +84,28 @@ requestRandomAsteroidPosition =
         yGenerator =
             Random.float -220.0 220.0
     in
-        Random.pair xGenerator yGenerator
-            |> Random.map (\( x, y ) -> { x = x, y = y })
+        Random.map2 Position xGenerator yGenerator
 
 
 requestRandomAsteroidPositions : Cmd Msg
 requestRandomAsteroidPositions =
-    Random.generate GenerateAsteroid requestRandomAsteroidPosition
+    Random.generate GenerateAsteroid asteroidPositionGenerator
         |> List.repeat 12
         |> Cmd.batch
+
+
+
+-- UPDATE
+
+
+type Msg
+    = CableMsg ACMsg.Msg
+    | Tick Time.Time
+    | CableConnected ()
+    | KeyDown Keyboard.KeyCode
+    | KeyUp Keyboard.KeyCode
+    | DataReceived ID.Identifier JD.Value
+    | GenerateAsteroid Position
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -117,19 +122,64 @@ update msg model =
             tick time model
 
         KeyDown 32 ->
-            fire model ! []
+            ( fire model, Cmd.none )
 
         KeyDown keyCode ->
-            ( { model | keysDown = Set.insert keyCode model.keysDown }, Cmd.none )
+            ( { model | keysDown = Set.insert keyCode model.keysDown }
+            , Cmd.none
+            )
 
         KeyUp keyCode ->
-            ( { model | keysDown = Set.remove keyCode model.keysDown }, Cmd.none )
+            ( { model | keysDown = Set.remove keyCode model.keysDown }
+            , Cmd.none
+            )
 
         DataReceived _ jsonValue ->
             ( dataReceived jsonValue model, Cmd.none )
 
         GenerateAsteroid position ->
-            { model | asteroids = position :: model.asteroids } ! []
+            ( { model | asteroids = position :: model.asteroids }
+            , Cmd.none
+            )
+
+
+
+-- Joining the game
+
+
+joinGame : Model -> ( Model, Cmd Msg )
+joinGame model =
+    case subscribeToGame model of
+        Ok model_cmd ->
+            model_cmd
+
+        Err err ->
+            ( { model
+                | error = Just <| ActionCable.errorToString err
+              }
+            , Cmd.none
+            )
+
+
+subscribeToGame :
+    Model
+    -> Result ActionCable.ActionCableError ( Model, Cmd Msg )
+subscribeToGame model =
+    let
+        setCable ( newCable, cmd ) =
+            ( { model | cable = newCable }, cmd )
+    in
+        ActionCable.subscribeTo identifier model.cable
+            |> Result.map setCable
+
+
+identifier : ID.Identifier
+identifier =
+    ID.newIdentifier "GamesChannel" []
+
+
+
+-- receiving the updated score
 
 
 dataReceived : JD.Value -> Model -> Model
@@ -138,6 +188,10 @@ dataReceived json model =
         |> JD.decodeValue (JD.field "score" JD.int)
         |> Result.toMaybe
         |> (\score -> { model | score = score })
+
+
+
+-- Fire!
 
 
 fire : Model -> Model
@@ -157,45 +211,26 @@ fire ({ laser, myPosition } as model) =
                     { model | laser = newLaser }
 
 
-leftEdge : Float
-leftEdge =
-    -480.0
+
+-- AnimationFrame loop
 
 
 tick : Time.Time -> Model -> ( Model, Cmd Msg )
 tick time model =
     model
-        |> moveShip
+        |> moveShipAndLaser
         |> moveAsteroids
         |> blowUpAsteroid
         |> postScore
         |> (\( m, a, cmd ) -> ( m, regenerateAsteroids a cmd ))
 
 
-postScore : ( Model, List Position, List Position ) -> ( Model, List Position, Cmd Msg )
-postScore ( model, past, blownUp ) =
-    ( model, List.append past blownUp, sendScoreUpdate (List.length blownUp) model.cable )
+
+-- Move Ship
 
 
-sendScoreUpdate : Int -> ActionCable Msg -> Cmd Msg
-sendScoreUpdate int cable =
-    if int > 0 then
-        ActionCable.perform "scoreUpdate" [ ( "score", JE.int int ) ] identifier cable
-            |> Result.withDefault Cmd.none
-    else
-        Cmd.none
-
-
-regenerateAsteroids : List Position -> Cmd Msg -> Cmd Msg
-regenerateAsteroids asteroids cmd =
-    asteroids
-        |> List.map (\_ -> Random.generate GenerateAsteroid requestRandomAsteroidPosition)
-        |> (::) cmd
-        |> Cmd.batch
-
-
-moveShip : Model -> Model
-moveShip ({ myPosition } as model) =
+moveShipAndLaser : Model -> Model
+moveShipAndLaser ({ myPosition } as model) =
     let
         moveMe =
             if Set.member 38 model.keysDown then
@@ -216,6 +251,10 @@ moveLaser { x, y } =
     { x = x + 10, y = y }
 
 
+
+-- Move asteroids
+
+
 moveAsteroids : Model -> ( Model, List Position )
 moveAsteroids model =
     let
@@ -230,7 +269,13 @@ moveAsteroids model =
         ( { model | asteroids = kept }, past )
 
 
-blowUpAsteroid : ( Model, List Position ) -> ( Model, List Position, List Position )
+
+-- Blow up asteroids
+
+
+blowUpAsteroid :
+    ( Model, List Position )
+    -> ( Model, List Position, List Position )
 blowUpAsteroid ( model, past ) =
     case model.laser of
         Nothing ->
@@ -238,11 +283,16 @@ blowUpAsteroid ( model, past ) =
 
         Just laser ->
             let
-                ( blownUp, stickAround ) =
-                    List.partition (detectCollision laser) model.asteroids
+                ( blownUp, keep ) =
+                    List.partition
+                        (detectCollision laser)
+                        model.asteroids
             in
                 if List.length blownUp > 0 then
-                    ( { model | asteroids = stickAround, laser = Nothing }, past, blownUp )
+                    ( { model | asteroids = keep, laser = Nothing }
+                    , past
+                    , blownUp
+                    )
                 else
                     ( model, past, [] )
 
@@ -252,34 +302,67 @@ detectCollision laser asteroid =
     asteroidRadius > (sqrt <| (asteroid.x - laser.x) ^ 2 + (asteroid.y - laser.y) ^ 2)
 
 
+
+-- Post a new score
+
+
+postScore :
+    ( Model, List Position, List Position )
+    -> ( Model, List Position, Cmd Msg )
+postScore ( model, past, blownUp ) =
+    ( model
+    , List.append past blownUp
+    , sendScoreUpdate (List.length blownUp) model.cable
+    )
+
+
+sendScoreUpdate : Int -> ActionCable Msg -> Cmd Msg
+sendScoreUpdate int cable =
+    if int > 0 then
+        Result.withDefault Cmd.none <|
+            ActionCable.perform
+                "scoreUpdate"
+                [ ( "score", JE.int int ) ]
+                identifier
+                cable
+    else
+        Cmd.none
+
+
+
+-- Regenerate asteroids that were blown up or past the screen
+
+
+regenerateAsteroids : List Position -> Cmd Msg -> Cmd Msg
+regenerateAsteroids asteroids existingCmd =
+    let
+        regen _ =
+            Random.generate
+                GenerateAsteroid
+                asteroidPositionGenerator
+    in
+        asteroids
+            |> List.map regen
+            |> (::) existingCmd
+            |> Cmd.batch
+
+
+
+-- geometry data
+
+
 asteroidRadius : Float
 asteroidRadius =
     30.0
 
 
-identifier : ID.Identifier
-identifier =
-    ID.newIdentifier "GamesChannel" []
-
-
-joinGame : Model -> ( Model, Cmd Msg )
-joinGame model =
-    case subscribeToGame model of
-        Ok model_cmd ->
-            model_cmd
-
-        Err err ->
-            ( { model | error = Just <| ActionCable.errorToString err }, Cmd.none )
-
-
-subscribeToGame : Model -> Result ActionCable.ActionCableError ( Model, Cmd Msg )
-subscribeToGame model =
-    ActionCable.subscribeTo identifier model.cable
-        |> Result.map (\( cable, cmd ) -> ( { model | cable = cable }, cmd ))
+leftEdge : Float
+leftEdge =
+    -480.0
 
 
 
---
+-- VIEW
 
 
 view : Model -> Html Msg
@@ -298,7 +381,8 @@ gameItems model =
           , shipView model.myPosition
           ]
         , List.map asteroidView model.asteroids
-        , Maybe.withDefault [] <| Maybe.map (laserView >> List.singleton) model.laser
+        , Maybe.withDefault [] <|
+            Maybe.map (laserView >> List.singleton) model.laser
         ]
 
 
@@ -309,10 +393,10 @@ space =
 
 
 connectedSignal : Model -> C.Form
-connectedSignal model =
+connectedSignal { cable } =
     let
         colorFill =
-            if Dict.isEmpty <| ActionCable.subscriptions model.cable then
+            if Dict.isEmpty <| ActionCable.subscriptions cable then
                 Color.gray
             else
                 Color.green
@@ -330,8 +414,7 @@ scoreView int =
         |> (++) "Score: "
         |> Text.fromString
         |> Text.color Color.white
-        |> Element.rightAligned
-        |> C.toForm
+        |> C.text
         |> C.move (( 420.0, 240 ))
 
 
@@ -357,7 +440,7 @@ asteroidView position =
 
 
 
---
+-- SUBSCRIPTIONS
 
 
 subscriptions : Model -> Sub Msg
